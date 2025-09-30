@@ -1,9 +1,8 @@
 from fastapi import APIRouter,HTTPException,Query,Depends
-from core.catalog_client import get_catalog_client
+from core.catalog_client import get_catalog_client,security,verify_jwt
 import logging
 from pyiceberg.exceptions import NamespaceAlreadyExistsError,NoSuchNamespaceError
 from fastapi.security import HTTPAuthorizationCredentials
-from core.auth import verify_jwt,security
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/namespaces", tags=["Namespaces"])

@@ -1,8 +1,8 @@
 from fastapi import APIRouter,Query,HTTPException,Depends
 from pyiceberg.exceptions import NoSuchTableError
-from core.catalog_client import get_catalog_client
+from core.catalog_client import get_catalog_client,security,verify_jwt
 from fastapi.security import HTTPAuthorizationCredentials
-from core.auth import verify_jwt,security
+
 
 
 router = APIRouter(prefix="", tags=["Tables"])
