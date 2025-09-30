@@ -1,20 +1,13 @@
 from mapping import *
-# from pyiceberg import types
-# from pyiceberg.partitioning import PartitionSpec, PartitionField
-# from pyiceberg.transforms import IdentityTransform
-# from pyiceberg.exceptions import NoSuchNamespaceError, NoSuchTableError
 from fastapi import APIRouter, Query,  HTTPException,Depends
 from datetime import datetime
 import time
 import pyarrow as pa
-
 from pyiceberg.expressions import EqualTo,And,GreaterThanOrEqual,LessThanOrEqual
 from core.catalog_client import get_catalog_client,get_r2_client,mssql_branch,security,verify_jwt
 import pandas as pd
 from fastapi import Request
 from fastapi.security import  HTTPAuthorizationCredentials
-
-
 
 router = APIRouter(prefix="/branch", tags=["branch"])
 
@@ -44,9 +37,11 @@ def branch(
     # Convert INVOICE_DATE if needed
     uploaded_files = []
     for r in rows:
-        if isinstance(r.get("Branch"), str):
-            r["Branch"] = str(r["Branch"])
-
+        docdate_val = r.get("DocDate")
+        if isinstance(docdate_val, int):  # e.g., 20250929
+            r["DocDate"] = datetime.strptime(str(docdate_val), "%Y%m%d").date()
+        elif isinstance(docdate_val, str):
+            r["DocDate"] = datetime.strptime(docdate_val, "%Y-%m-%d").date()
 
         # row_dict = dict(r)
 
@@ -54,11 +49,19 @@ def branch(
     iceberg_fields = []
     arrow_fields = []
     first_row = rows[0]
-
+    print(f"First row: {first_row}")
     for idx, (name, value) in enumerate(first_row.items(), start=1):
         py_type = type(value).__name__.lower()
         ice_type = type_mapping.get(py_type, StringType())
         arrow_type = arrow_mapping.get(py_type, pa.string())
+
+        if name == "DocDate":
+            ice_type = DateType()
+            arrow_type = pa.date32()
+        if name == ["DocValue","Qty","FreeQty","RateUnit","Amount","DiscAmount1",
+                    "DiscAmount2","TaxPerc","TaxAmount"]:
+            ice_type = FloatType()
+            arrow_type = FloatType()
 
         iceberg_fields.append(NestedField(field_id=idx, name=name, field_type=ice_type, required=False))
         arrow_fields.append(pa.field(name, arrow_type, nullable=True))
@@ -70,9 +73,33 @@ def branch(
     catalog = get_catalog_client()
     table_identifier = f"{namespace}.{table_name}"
     tbl = get_or_create_table(catalog, table_identifier, iceberg_schema)
+    # key_cols = ["DocDate"]
 
+    # Get existing keys from table
+    # existing_keys = set()
+    # try:
+    #     existing_df = tbl.scan().to_arrow(columns=key_cols).to_pandas()
+    #     for _, row in existing_df.iterrows():
+    #         existing_keys.add(tuple(row[c] for c in key_cols))
+    # except Exception as e:
+    #     print(f"No existing data or could not read existing keys: {e}")
+
+    # Filter new rows
+    # unique_rows = []
+    # for r in rows:
+    #     key = (r["Branch", "ItemCode", "DocDate"])
+    #     if key not in existing_keys:
+    #         unique_rows.append(r)
+
+    # if not unique_rows:
+    #     return {
+    #         "status": "skipped",
+    #         "message": "All rows already exist. Nothing inserted.",
+    #         "uploaded_files": uploaded_files
+    #     }
     # Append only new rows
     arrow_table = pa.Table.from_pylist(rows, schema=arrow_schema)
+    print("arrow_table",arrow_table)
     # tbl.append(arrow_table)
     tbl.append(arrow_table)
 
@@ -182,7 +209,7 @@ def delete_invoices(
 
     before_count = len(df)
 
-    # ✅ Ensure INVOICE_DATE is comparable
+    # Ensure INVOICE_DATE is comparable
     if pd.api.types.is_datetime64_any_dtype(df["INVOICE_DATE"]):
         df["INVOICE_DATE"] = df["INVOICE_DATE"].dt.date
 
@@ -338,7 +365,6 @@ def get_data(
                 "summary": getattr(s, "summary", {})
             })
     except Exception as e:
-
         raise HTTPException(status_code=500, detail="Error retrieving snapshot data")
 
     return {
@@ -436,8 +462,6 @@ def get_filtered_data(
     credentials: HTTPAuthorizationCredentials = Depends(security)
 ):
     verify_jwt(credentials.credentials)
-    # print(columns)
-    # print(values)
     start_time = time.time()
 
     # Handle comma-separated inputs
@@ -593,256 +617,6 @@ def get_filtered_data(
         )
 
 
-
-#
-# from pydantic import BaseModel
-#
-# class DeleteSnapshotRequest(BaseModel):
-#     snapshot_id: str
-#
-# @router.get("/Inspect")
-# def table_inspect(
-#     namespace: str = Query(..., description="Namespace (e.g. 'Namespace')"),
-#     table_name: str = Query(..., description="Table name (e.g. 'Table name')")
-# ):
-#     try:
-#         catalog = get_catalog_client()
-#         table = catalog.load_table((namespace, table_name))
-#
-#         snapshots = list(table.snapshots())
-#
-#         snapshot_data = []
-#         for s in snapshots:
-#             snapshot_data.append({
-#                 "snapshot_id": getattr(s, "snapshot_id", None),
-#                 "parent_snapshot_id": getattr(s, "parent_snapshot_id", None),
-#                 "timestamp_ms": getattr(s, "timestamp_ms", None),
-#                 "manifest_list": getattr(s, "manifest_list", None),
-#                 "summary": getattr(s, "summary", {})
-#             })
-#
-#         return {
-#             "namespace": namespace,
-#             "table_name": table.name,
-#             "records_count": len(snapshots),
-#             "snapshots": snapshot_data
-#         }
-#
-#     except Exception as e:
-#         raise HTTPException(status_code=500, detail=f"Failed to inspect table: {str(e)}")
-#
-#
-# @router.delete("/DeleteSnapshot")
-# def delete_snapshot(
-#     namespace: str = Query(..., description="Namespace (e.g. 'Namespace')"),
-#     table_name: str = Query(..., description="Table name (e.g. 'Table name')"),
-#     req: DeleteSnapshotRequest = Body(...)
-# ):
-#     try:
-#         catalog = get_catalog_client()
-#         table = catalog.load_table((namespace, table_name))
-#
-#         # Rollback to the snapshot (remove all snapshots after it)
-#         ops = table.manage_snapshots()
-#         ops.rollback_to(req.snapshot_id)
-#         ops.commit()
-#
-#         return {
-#             "message": f"Rollback to snapshot {req.snapshot_id} completed successfully"
-#         }
-#
-#     except Exception as e:
-#         raise HTTPException(status_code=500, detail=f"Failed to rollback: {str(e)}")
-#
-# @router.get("/filter-data")
-# def get_filtered_datas(
-#     namespace: str = Query(..., description="Namespace (e.g. 'crm')"),
-#     table_name: str = Query(..., description="Table name (e.g. 'serial_number_requests')"),
-#     columns: list[str] = Query(..., description="Columns to filter on (comma-separated or multiple query params)"),
-#     values: list[str] = Query(..., description="Values to match (in same order as columns)")
-# ):
-#     start_time = time.time()
-#
-#     # Handle comma-separated inputs
-#     if len(columns) == 1 and ',' in columns[0]:
-#         columns = [c.strip() for c in columns[0].split(',')]
-#     if len(values) == 1 and ',' in values[0]:
-#         values = [v.strip() for v in values[0].split(',')]
-#
-#     try:
-#         # Check lengths
-#         if len(columns) != len(values):
-#             raise HTTPException(
-#                 status_code=400,
-#                 detail={
-#                     "status": "error",
-#                     "error_code": "MISMATCHED_COLUMNS_VALUES",
-#                     "message": "Number of columns and values must match",
-#                     "data": []
-#                 }
-#             )
-#
-#         # Load table
-#         catalog = get_catalog_client()
-#         table = catalog.load_table((namespace, table_name))
-#
-#         # Validate columns
-#         schema_fields = {f.name for f in table.schema().fields}
-#         for col in columns:
-#             if col not in schema_fields:
-#                 raise HTTPException(
-#                     status_code=404,
-#                     detail={
-#                         "status": "error",
-#                         "error_code": "COLUMN_NOT_FOUND",
-#                         "message": f"Column '{col}' not found in schema",
-#                         "data": []
-#                     }
-#                 )
-#
-#         # Build filter expression
-#         filters = None
-#         for col, val in zip(columns, values):
-#             condition = EqualTo(col, val)
-#             filters = condition if filters is None else And(filters, condition)
-#
-#         # Apply filter
-#         scan = table.scan(row_filter=filters)
-#         arrow_table = scan.to_arrow()
-#
-#         rows = []
-#         for batch in arrow_table.to_batches():
-#             rows.extend(batch.to_pylist())
-#
-#         elapsed = round(time.time() - start_time, 2)
-#
-#         if len(rows) == 0:
-#             raise HTTPException(
-#                 status_code=404,
-#                 detail={
-#                     "status": "error",
-#                     "error_code": "NO_DATA",
-#                     "message": "No data found",
-#                     "data": []
-#                 }
-#             )
-#
-#         return {
-#             "status": "success",
-#             "status_code": 200,
-#             "count": len(scan.to_arrow()),
-#             "data": scan.to_arrow().to_pylist(),
-#             "execution_time_seconds": elapsed
-#         }
-#
-#     except HTTPException as http_err:
-#         # Re-raise known HTTP errors
-#         raise http_err
-#
-#     except Exception as e:
-#         # Catch any unknown errors
-#         raise HTTPException(
-#             status_code=500,
-#             detail={
-#                 "status": "error",
-#                 "error_code": "INTERNAL_ERROR",
-#                 "message": str(e),
-#                 "data": []
-#             }
-#         )
-
-
-# @router.get("/GetOne")
-# def get_one(
-#     namespace: str = Query(..., description="Namespace (bucket name in R2)"),
-#     table_name: str = Query(..., description="Table name"),
-#     year: Optional[int] = Query(None, description="Year (YYYY)"),
-#     month: int = Query(...),
-#     day: int = Query(...),
-#     ticket_id: str = Query(..., description="Ticket ID"),
-# ):
-#     r2_client = get_r2_client()
-#     key = f"{namespace}/{table_name}/{year}/{month}/{day}/{ticket_id}.json"
-#
-#     try:
-#         obj = r2_client.get_object(Bucket=namespace, Key=key)
-#         body = obj["Body"].read().decode("utf-8")
-#         return json.loads(body)
-#     except Exception as e:
-#         raise HTTPException(status_code=404, detail=f"Object not found: {str(e)}")
-# from typing import Optional, List
-# from pydantic import BaseModel
-#
-# class RecordModel(BaseModel):
-#     ticketId: str
-#     createdAt: str
-#     mobileNo: Optional[str] = None
-#     warehouseCode: Optional[str] = None
-#     productName: Optional[str] = None
-#     itemCode: Optional[str] = None
-#     branchName: Optional[str] = None
-#
-# @router.get("/GetRecords", response_model=List[RecordModel])
-# def get_records(
-#     namespace: str = Query(..., description="Namespace (bucket name in R2)"),
-#     table_name: str = Query(..., description="Table name"),
-#     year: Optional[int] = Query(None, description="Year (YYYY)"),
-#     month: Optional[int] = Query(None, description="Month (MM)"),
-#     day: Optional[int] = Query(None, description="Day (DD)"),
-#     ticket_id: Optional[str] = Query(None, description="Ticket ID"),
-#     mobile_no: Optional[str] = Query(None, description="Mobile Number"),
-#     warehouse_code: Optional[str] = Query(None, description="Warehouse Code"),
-#     product_name: Optional[str] = Query(None, description="Product Name"),
-#     item_code: Optional[str] = Query(None, description="Item Code"),
-#     branch_name: Optional[str] = Query(None, description="Branch Name"),
-# ):
-#     r2_client = get_r2_client()
-#
-#     # Prefix to narrow search (e.g. /namespace/table/year/month/day/)
-#     prefix_parts = [table_name]
-#     if year: prefix_parts.append(str(year))
-#     if month: prefix_parts.append(str(month))
-#     if day: prefix_parts.append(str(day))
-#
-#     prefix = "/".join(prefix_parts)
-#     print(ticket_id)
-#
-#     try:
-#         response = r2_client.list_objects_v2(Bucket=namespace, Prefix=prefix)
-#         print(response)
-#         records = []
-#
-#         if "Contents" not in response:
-#             return []
-#
-#         for obj in response["Contents"]:
-#             key = obj["Key"]
-#             file_obj = r2_client.get_object(Bucket=namespace, Key=key)
-#             body = file_obj["Body"].read().decode("utf-8")
-#             record = json.loads(body)
-#
-#             # Apply filters
-#             if ticket_id and record.get("ticketId") != ticket_id:
-#                 continue
-#             if mobile_no and record.get("mobileNo") != mobile_no:
-#                 continue
-#             if warehouse_code and record.get("warehouseCode") != warehouse_code:
-#                 continue
-#             if product_name and record.get("productName") != product_name:
-#                 continue
-#             if item_code and record.get("itemCode") != item_code:
-#                 continue
-#             if branch_name and record.get("branchName") != branch_name:
-#                 continue
-#
-#             records.append(RecordModel(**record))
-#             print("data:",records)
-#
-#         return records
-#
-#     except Exception as e:
-#         raise HTTPException(status_code=500, detail=f"Error fetching records: {str(e)}")
-
 @router.get("/list")
 def get_bucket_list(
     bucket_name: str = Query(..., title="Bucket Name"),
@@ -857,7 +631,7 @@ def get_bucket_list(
 
     try:
         response = r2_client.list_objects_v2(Bucket=bucket_name, Prefix=prefix)
-        print(response)
+        # print(response)
 
         files = []
         if "Contents" in response:
@@ -883,8 +657,8 @@ def delete_files(
     verify_jwt(credentials.credentials)
     r2_client = get_r2_client()
     prefix = f"{bucket_path}/"
-    print("Deleting files")
-    print(f"{prefix}")
+    # print("Deleting files")
+    # print(f"{prefix}")
     try:
         deleted_files = []
 
